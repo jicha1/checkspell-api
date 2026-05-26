@@ -27,12 +27,13 @@ app = FastAPI(title="Thai Spell Check API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://proletterdemo.infinityfreeapp.com",
         "http://localhost",
         "http://127.0.0.1",
         "http://localhost:80",
         "http://127.0.0.1:80",
     ],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
