@@ -1,4 +1,4 @@
-#  pro_letter/checkspell/main.py
+# pro_letter/checkspell/main.py
 
 from pathlib import Path
 from typing import List
@@ -30,6 +30,89 @@ def load_custom_dict() -> set[str]:
 
 
 CUSTOM_WORDS = load_custom_dict()
+
+
+def clean_suggestions(word: str, suggestions) -> List[str]:
+    """กรองคำแนะนำที่ไม่ควรแสดง เช่น คำแนะนำที่เหมือนคำเดิม"""
+    if not isinstance(suggestions, list):
+        suggestions = [suggestions]
+
+    cleaned = []
+    for suggestion in suggestions:
+        suggestion = str(suggestion).strip()
+        if not suggestion:
+            continue
+
+        # ห้ามแสดงคำเดิมเป็นคำแนะนำ
+        if suggestion == word:
+            continue
+
+        if suggestion not in cleaned:
+            cleaned.append(suggestion)
+
+    return cleaned
+
+
+def load_misspellings() -> dict:
+    if not MISSPELL_PATH.exists():
+        return {}
+
+    with open(MISSPELL_PATH, "r", encoding="utf-8") as f:
+        raw_misspellings = json.load(f)
+
+    misspellings = {}
+
+    for wrong_word, suggestions in raw_misspellings.items():
+        wrong_word = str(wrong_word).strip()
+
+        if not wrong_word:
+            continue
+
+        # ถ้าอยู่ใน custom_dict ให้ถือว่าเป็นคำถูก ไม่ต้องใช้เป็นคำผิด
+        if wrong_word in CUSTOM_WORDS:
+            continue
+
+        cleaned = clean_suggestions(wrong_word, suggestions)
+
+        # ถ้ากรองแล้วไม่มีคำแนะนำ แปลว่าไม่ควรถือเป็นคำผิด
+        if not cleaned:
+            continue
+
+        misspellings[wrong_word] = cleaned
+
+    return misspellings
+
+
+COMMON_MISSPELLINGS = load_misspellings()
+
+# เตรียมรายการไว้ครั้งเดียว ไม่ sort ใหม่ทุก request
+SORTED_MISSPELLINGS = sorted(
+    COMMON_MISSPELLINGS.items(),
+    key=lambda x: len(x[0]),
+    reverse=True
+)
+
+
+app = FastAPI(title="Thai Spell Check API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://proletterdemo.infinityfreeapp.com",
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://localhost:80",
+        "http://127.0.0.1:80",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class SpellCheckRequest(BaseModel):
+    field: str
+    text: str
 
 
 def is_thai_word(word: str) -> bool:
@@ -68,74 +151,6 @@ def should_ignore_word(word: str) -> bool:
     return False
 
 
-def clean_suggestions(word: str, suggestions) -> List[str]:
-    """กรองคำแนะนำที่ไม่ควรแสดง เช่น คำแนะนำที่เหมือนคำเดิม"""
-    if not isinstance(suggestions, list):
-        suggestions = [suggestions]
-
-    cleaned = []
-    for suggestion in suggestions:
-        suggestion = str(suggestion).strip()
-        if not suggestion:
-            continue
-        # ห้ามแสดงคำเดิมเป็นคำแนะนำ เพราะจะทำให้คำถูกถูกมองว่าเป็นคำผิด
-        if suggestion == word:
-            continue
-        if suggestion not in cleaned:
-            cleaned.append(suggestion)
-    return cleaned
-
-
-def load_misspellings() -> dict:
-    if not MISSPELL_PATH.exists():
-        return {}
-
-    with open(MISSPELL_PATH, "r", encoding="utf-8") as f:
-        raw_misspellings = json.load(f)
-
-    misspellings = {}
-    for wrong_word, suggestions in raw_misspellings.items():
-        wrong_word = str(wrong_word).strip()
-        if not wrong_word:
-            continue
-
-        # คำใน custom_dict ถือว่าเป็นคำถูก ไม่ต้องใช้เป็นคำผิด
-        if wrong_word in CUSTOM_WORDS:
-            continue
-
-        cleaned = clean_suggestions(wrong_word, suggestions)
-        if not cleaned:
-            continue
-
-        misspellings[wrong_word] = cleaned
-
-    return misspellings
-
-
-COMMON_MISSPELLINGS = load_misspellings()
-# เตรียมรายการไว้ครั้งเดียว ไม่ต้อง sort ใหม่ทุก request ช่วยลดเวลาตรวจข้อความยาว
-SORTED_MISSPELLINGS = sorted(COMMON_MISSPELLINGS.items(), key=lambda x: len(x[0]), reverse=True)
-
-app = FastAPI(title="Thai Spell Check API")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost",
-        "http://127.0.0.1",
-        "http://localhost:80",
-        "http://127.0.0.1:80",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-class SpellCheckRequest(BaseModel):
-    field: str
-    text: str
-
-
 def tokenize_text(text: str) -> List[str]:
     return word_tokenize(text, engine="newmm")
 
@@ -148,8 +163,10 @@ def check_word(word: str):
 
     if word in COMMON_MISSPELLINGS:
         suggestions = clean_suggestions(word, COMMON_MISSPELLINGS[word])
+
         if not suggestions:
             return None
+
         return {
             "word": word,
             "suggestions": suggestions[:5]
@@ -194,7 +211,6 @@ def api_spell_check(payload: SpellCheckRequest):
     seen_words = set()
 
     # 1) เช็กจาก common_misspellings แบบปลอดภัย
-    # ไม่จับคำถูกเป็นคำผิด และไม่จับคำผิดที่เป็นส่วนหนึ่งของคำถูก เช่น โรงแรม ไม่ควรถูกจับเป็น โรงแร
     for wrong_word, suggestions in SORTED_MISSPELLINGS:
         if wrong_word in seen_words:
             continue
@@ -203,12 +219,15 @@ def api_spell_check(payload: SpellCheckRequest):
             continue
 
         suggestions = clean_suggestions(wrong_word, suggestions)
+
         if not suggestions:
             continue
 
         if wrong_word in text:
             is_part_of_correct_suggestion = any(
-                wrong_word != correct_word and wrong_word in correct_word and correct_word in text
+                wrong_word != correct_word
+                and wrong_word in correct_word
+                and correct_word in text
                 for correct_word in suggestions
             )
 
@@ -226,10 +245,12 @@ def api_spell_check(payload: SpellCheckRequest):
 
     for token in tokens:
         token = token.strip()
+
         if token in seen_words:
             continue
 
         result = check_word(token)
+
         if result:
             found_errors.append({
                 "wrongWord": result["word"],
@@ -244,9 +265,8 @@ def api_spell_check(payload: SpellCheckRequest):
     }
 
 
+# รัน local:
 # uvicorn checkspell.main:app --reload --host 127.0.0.1 --port 8001
-# ต้องใช้ใน git bash
-
 
 # Start Command บน Render:
 # uvicorn main:app --host 0.0.0.0 --port $PORT
